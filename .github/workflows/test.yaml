@@ -1,0 +1,72 @@
+name: Docker Image CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build-and-scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Checkout the code
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      # Step 2: Set up Docker Buildx
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+
+      # Step 3: Build the Docker image
+      - name: Build the Docker image
+        run: docker build -t my-node-app .
+
+      # Step 4: Scan the Docker image with Trivy
+      - name: Scan the Docker image with Trivy
+        uses: aquasecurity/trivy-action@v0.10.0
+        with:
+          image-ref: my-node-app
+          format: 'table'
+          output: 'trivy-report.txt'
+
+      # Step 5: Upload Trivy scan report as an artifact
+      - name: Upload Trivy scan report
+        uses: actions/upload-artifact@v3
+        with:
+          name: trivy-report
+          path: trivy-report.txt
+
+      # Step 6: Fail the job if vulnerabilities of a certain level are found
+      - name: Check for vulnerabilities
+        id: check_vulnerabilities
+        run: |
+          if grep -q "CRITICAL" trivy-report.txt; then
+            echo "Critical vulnerabilities found!"
+            exit 1
+          fi
+
+      # Step 7: Snyk SCA
+      - name: Snyk Scan
+        uses: snyk/actions/node@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      # Step 8: Semgrep SAST
+      - name: Semgrep Scan
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: 'auto'  # Use 'auto' or provide your custom Semgrep config URL or path
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Step 9: Upload Semgrep scan report as an artifact
+      - name: Upload Semgrep scan report
+        uses: actions/upload-artifact@v3
+        with:
+          name: semgrep-report
+          path: semgrep.sarif
