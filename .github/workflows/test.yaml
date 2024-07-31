@@ -12,13 +12,20 @@ permissions:
   security-events: write
 
 jobs:
-  trufflehog:
+  setup:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
       uses: actions/checkout@v3
       with:
         fetch-depth: 0
+
+  trufflehog:
+    runs-on: ubuntu-latest
+    needs: setup
+    steps:
+    - name: Clone repository
+      run: git clone https://github.com/jai3747/31-aug-task.git
 
     - name: Determine scan range
       id: scan_range
@@ -36,10 +43,10 @@ jobs:
         echo "base=${BASE}" >> $GITHUB_OUTPUT
         echo "head=${HEAD}" >> $GITHUB_OUTPUT
 
-    - name: TruffleHog OSS
+    - name: Run TruffleHog OSS
       uses: trufflesecurity/trufflehog@main
       with:
-        path: ./
+        path: ./31-aug-task
         base: ${{ steps.scan_range.outputs.base }}
         head: ${{ steps.scan_range.outputs.head }}
         extra_args: --debug --only-verified --json
@@ -48,8 +55,8 @@ jobs:
       if: always()
       run: |
         echo "TruffleHog Scan Results:"
-        if [ -f trufflehog-results.json ]; then
-          cat trufflehog-results.json
+        if [ -f 31-aug-task/trufflehog-results.json ]; then
+          cat 31-aug-task/trufflehog-results.json
         else
           echo "No results file found. TruffleHog did not detect any issues."
         fi
@@ -60,7 +67,7 @@ jobs:
       if: always()
       with:
         name: trufflehog-results
-        path: trufflehog-results.json
+        path: 31-aug-task/trufflehog-results.json
         if-no-files-found: ignore
 
   sca_snyk:
@@ -138,7 +145,16 @@ jobs:
       uses: docker/setup-buildx-action@v2
 
     - name: Build Docker image
-      run: docker build -t my-node-app .
+      run: |
+        docker buildx create --use
+        docker buildx build --file Dockerfile --tag my-node-app --load .
+
+    - name: Check if Docker image was built
+      run: |
+        if ! docker images | grep my-node-app; then
+          echo "Docker image 'my-node-app' not found. Build failed."
+          exit 1
+        fi
 
     - name: Scan Docker image with Trivy
       uses: aquasecurity/trivy-action@v0.10.0
@@ -146,17 +162,18 @@ jobs:
         image-ref: my-node-app
         format: 'table'
         output: 'trivy-report.txt'
+      
+    - name: Check Trivy scan results
+      run: |
+        if grep -q "CRITICAL" trivy-report.txt; then
+          echo "Critical vulnerabilities found in Docker image!"
+          exit 1
+        else
+          echo "No critical vulnerabilities found in Docker image."
+        fi
 
     - name: Upload Trivy scan report
       uses: actions/upload-artifact@v2
       with:
         name: trivy-report
         path: trivy-report.txt
-
-    - name: Check for vulnerabilities
-      id: check_vulnerabilities
-      run: |
-        if grep -q "CRITICAL" trivy-report.txt; then
-          echo "Critical vulnerabilities found!"
-          exit 1
-        fi
