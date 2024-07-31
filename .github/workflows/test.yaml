@@ -35,8 +35,6 @@ jobs:
         uses: returntocorp/semgrep-action@v1
         with:
           config: 'auto'  # Use 'auto' or provide your custom Semgrep config URL or path
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # Step 5: Upload Semgrep scan report as an artifact
       - name: Upload Semgrep scan report
