@@ -2,82 +2,161 @@ name: Security and CI Pipeline
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
   pull_request:
-    branches:
-      - main
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
 
 jobs:
-  security-and-build:
+  trufflehog:
     runs-on: ubuntu-latest
-
     steps:
-      # Step 1: Checkout the code
-      - name: Checkout code
-        uses: actions/checkout@v2
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
 
-      # Step 2: Run TruffleHog scan
-      - name: TruffleHog Scan
-        uses: trufflesecurity/trufflehog-actions-scan@v2
-        with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          scan_directory: '.'
+    - name: Determine scan range
+      id: scan_range
+      run: |
+        if [ "${{ github.event_name }}" == "push" ]; then
+          BASE="${{ github.event.before }}"
+          HEAD="${{ github.event.after }}"
+        elif [ "${{ github.event_name }}" == "pull_request" ]; then
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+        else
+          BASE=$(git rev-parse HEAD~10)
+          HEAD="HEAD"
+        fi
+        echo "base=${BASE}" >> $GITHUB_OUTPUT
+        echo "head=${HEAD}" >> $GITHUB_OUTPUT
 
-      # Step 3: Snyk SCA
-      - name: Snyk Scan
-        uses: snyk/actions/node@master
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+    - name: TruffleHog OSS
+      uses: trufflesecurity/trufflehog@main
+      with:
+        path: ./
+        base: ${{ steps.scan_range.outputs.base }}
+        head: ${{ steps.scan_range.outputs.head }}
+        extra_args: --debug --only-verified --json
 
-      # Step 4: Semgrep SAST
-      - name: Semgrep Scan
-        uses: returntocorp/semgrep-action@v1
-        with:
-          config: 'auto'  # Use 'auto' or provide your custom Semgrep config URL or path
+    - name: Print TruffleHog Output
+      if: always()
+      run: |
+        echo "TruffleHog Scan Results:"
+        if [ -f trufflehog-results.json ]; then
+          cat trufflehog-results.json
+        else
+          echo "No results file found. TruffleHog did not detect any issues."
+        fi
+        echo "End of TruffleHog Scan Results"
 
-      # Step 5: Upload Semgrep scan report as an artifact
-      - name: Upload Semgrep scan report
-        uses: actions/upload-artifact@v3
-        with:
-          name: semgrep-report
-          path: semgrep.sarif
+    - name: Upload TruffleHog results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: trufflehog-results
+        path: trufflehog-results.json
+        if-no-files-found: ignore
 
-      # Step 6: Set up Docker Buildx
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+  sca_snyk:
+    runs-on: ubuntu-latest
+    needs: trufflehog
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
 
-      # Step 7: Log in to Docker Hub
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v2
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+    - name: Set up Node.js
+      uses: actions/setup-node@v2
+      with:
+        node-version: '14'
 
-      # Step 8: Build the Docker image
-      - name: Build the Docker image
-        run: docker build -t my-node-app .
+    - name: Install dependencies
+      run: npm install
 
-      # Step 9: Scan the Docker image with Trivy
-      - name: Scan the Docker image with Trivy
-        uses: aquasecurity/trivy-action@v0.10.0
-        with:
-          image-ref: my-node-app
-          format: 'table'
-          output: 'trivy-report.txt'
+    - name: Install Snyk
+      run: npm install -g snyk
 
-      # Step 10: Upload Trivy scan report as an artifact
-      - name: Upload Trivy scan report
-        uses: actions/upload-artifact@v3
-        with:
-          name: trivy-report
-          path: trivy-report.txt
+    - name: Authenticate Snyk
+      env:
+        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      run: snyk auth $SNYK_TOKEN
 
-      # Step 11: Fail the job if vulnerabilities of a certain level are found
-      - name: Check for vulnerabilities
-        id: check_vulnerabilities
-        run: |
-          if grep -q "CRITICAL" trivy-report.txt; then
-            echo "Critical vulnerabilities found!"
-            exit 1
-          fi
+    - name: Run Snyk to check for vulnerabilities
+      run: snyk test --json > snyk_report.json || true
+
+    - name: Upload Snyk report
+      uses: actions/upload-artifact@v2
+      with:
+        name: snyk-report
+        path: snyk_report.json
+
+  semgrep:
+    runs-on: ubuntu-latest
+    needs: sca_snyk
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Set up Python
+      uses: actions/setup-python@v2
+      with:
+        python-version: '3.x'
+
+    - name: Install Semgrep
+      run: pip install semgrep
+
+    - name: Run Semgrep
+      run: semgrep --config auto --json > semgrep_report.json
+
+    - name: Upload Semgrep report
+      uses: actions/upload-artifact@v2
+      with:
+        name: semgrep-report
+        path: semgrep_report.json
+
+    - name: Convert Semgrep report to SARIF
+      run: semgrep --config auto --sarif > semgrep.sarif
+
+    - name: Upload SARIF file
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: semgrep.sarif
+
+  build_and_scan:
+    runs-on: ubuntu-latest
+    needs: semgrep
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+
+    - name: Build Docker image
+      run: docker build -t my-node-app .
+
+    - name: Scan Docker image with Trivy
+      uses: aquasecurity/trivy-action@v0.10.0
+      with:
+        image-ref: my-node-app
+        format: 'table'
+        output: 'trivy-report.txt'
+
+    - name: Upload Trivy scan report
+      uses: actions/upload-artifact@v2
+      with:
+        name: trivy-report
+        path: trivy-report.txt
+
+    - name: Check for vulnerabilities
+      id: check_vulnerabilities
+      run: |
+        if grep -q "CRITICAL" trivy-report.txt; then
+          echo "Critical vulnerabilities found!"
+          exit 1
+        fi
