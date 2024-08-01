@@ -2,7 +2,6 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: my-node-app
-  namespace: default  
 spec:
   replicas: 1
   selector:
@@ -13,12 +12,17 @@ spec:
       labels:
         app: my-node-app
     spec:
+      securityContext:
+        runAsNonRoot: true
       containers:
       - name: my-node-app
-        image: my-node-app:latest  
-        imagePullPolicy: Never     
+        image: my-node-app:latest
+        imagePullPolicy: Never
         ports:
         - containerPort: 3000
+        securityContext:
+          allowPrivilegeEscalation: false
+
 ---
 apiVersion: v1
 kind: Service
