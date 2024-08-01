@@ -1,4 +1,4 @@
-name: Security Scan Pipeline
+name: Security and CI Pipeline
 
 on:
   push:
@@ -7,16 +7,22 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
-permissions:
-  contents: read
-  security-events: write
-
 jobs:
-  sca_snyk:
+  security_scan:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
-      uses: actions/checkout@v2
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+
+    - name: Run TruffleHog
+      uses: trufflesecurity/trufflehog@main
+      with:
+        path: .
+        base: ${{ github.event.before }}
+        head: ${{ github.event.after }}
+        extra_args: --only-verified
 
     - name: Set up Node.js
       uses: actions/setup-node@v2
@@ -26,61 +32,18 @@ jobs:
     - name: Install dependencies
       run: npm install
 
-    - name: Install Snyk
-      run: npm install -g snyk
-
-    - name: Authenticate Snyk
+    - name: Run Snyk
       env:
         SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-      run: snyk auth $SNYK_TOKEN
-
-    - name: Run Snyk to check for vulnerabilities
-      run: snyk test --json > snyk_report.json || true
-
-    - name: Upload Snyk report
-      uses: actions/upload-artifact@v2
-      with:
-        name: snyk-report
-        path: snyk_report.json
-
-  semgrep:
-    runs-on: ubuntu-latest
-    needs: sca_snyk
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v2
-
-    - name: Set up Python
-      uses: actions/setup-python@v2
-      with:
-        python-version: '3.x'
-
-    - name: Install Semgrep
-      run: pip install semgrep
+      run: |
+        npm install -g snyk
+        snyk test --json > snyk-results.json || true
+      continue-on-error: true
 
     - name: Run Semgrep
-      run: semgrep --config auto --json > semgrep_report.json
-
-    - name: Upload Semgrep report
-      uses: actions/upload-artifact@v2
+      uses: returntocorp/semgrep-action@v1
       with:
-        name: semgrep-report
-        path: semgrep_report.json
-
-    - name: Convert Semgrep report to SARIF
-      run: semgrep --config auto --sarif > semgrep.sarif
-
-    - name: Upload SARIF file
-      uses: github/codeql-action/upload-sarif@v2
-      with:
-        sarif_file: semgrep.sarif
-
-  build_and_scan:
-    runs-on: ubuntu-latest
-    needs: semgrep
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v2
+        config: auto
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v2
@@ -88,33 +51,22 @@ jobs:
     - name: Build Docker image
       run: |
         docker buildx create --use
-        docker buildx build --file Dockerfile --tag my-node-app --load .
+        docker buildx build --file Dockerfile --tag my-app:${{ github.sha }} --load .
 
-    - name: Check if Docker image was built
-      run: |
-        if ! docker images | grep my-node-app; then
-          echo "Docker image 'my-node-app' not found. Build failed."
-          exit 1
-        fi
-
-    - name: Scan Docker image with Trivy
-      uses: aquasecurity/trivy-action@v0.10.0
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
       with:
-        image-ref: my-node-app
+        image-ref: 'my-app:${{ github.sha }}'
         format: 'table'
-        output: 'trivy-report.txt'
-      
-    - name: Check Trivy scan results
-      run: |
-        if grep -q "CRITICAL" trivy-report.txt; then
-          echo "Critical vulnerabilities found in Docker image!"
-          exit 1
-        else
-          echo "No critical vulnerabilities found in Docker image."
-        fi
+        exit-code: '1'
+        ignore-unfixed: true
+        vuln-type: 'os,library'
+        severity: 'CRITICAL,HIGH'
 
-    - name: Upload Trivy scan report
+    - name: Upload scan results
       uses: actions/upload-artifact@v2
       with:
-        name: trivy-report
-        path: trivy-report.txt
+        name: scan-results
+        path: |
+          snyk-results.json
+          semgrep-results.sarif
