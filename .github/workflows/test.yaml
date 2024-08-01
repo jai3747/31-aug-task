@@ -87,5 +87,9 @@ jobs:
         ECR_REPOSITORY: ${{ secrets.AWS_ECR_REPOSITORY_NAME }}
         IMAGE_TAG: ${{ github.sha }}
       run: |
+        if [ -z "$ECR_REPOSITORY" ]; then
+          echo "Error: ECR_REPOSITORY is not set. Please make sure AWS_ECR_REPOSITORY_NAME secret is configured."
+          exit 1
+        fi
         docker tag my-node-app:${{ github.sha }} $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
         docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
