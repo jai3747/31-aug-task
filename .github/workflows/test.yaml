@@ -101,11 +101,7 @@ jobs:
 
     - name: Start Minikube
       run: minikube start
-      env:
-        KUBECONFIG: ${{ secrets.KUBECONFIG }}
-
-    - name: Configure Docker to use Minikube
-      run: eval $(minikube docker-env)
+     
 
     - name: Deploy to Minikube
       run: |
