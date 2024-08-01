@@ -70,3 +70,18 @@ jobs:
         path: |
           snyk-results.json
           semgrep-results.sarif
+
+    - name: Log in to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Push Docker image to Amazon ECR
+      run: |
+        IMAGE_TAG=my-node-app:${{ github.sha }}
+        REPOSITORY_URI=${{ secrets.AWS_ECR_REPOSITORY_URI }}
+        docker tag $IMAGE_TAG $REPOSITORY_URI:$IMAGE_TAG
+        docker push $REPOSITORY_URI:$IMAGE_TAG
+      env:
+        AWS_REGION: ${{ secrets.AWS_REGION }}
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
