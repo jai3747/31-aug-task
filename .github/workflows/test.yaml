@@ -1,4 +1,5 @@
 name: Security and CI Pipeline
+
 on:
   push:
     branches: [ main ]
@@ -7,14 +8,14 @@ on:
   workflow_dispatch:
 
 jobs:
-  security_scan_and_push:
-    runs-on: ubuntu-latest
+  security_scan_and_deploy:
+    runs-on: self-hosted  # Use your self-hosted runner
     steps:
     - name: Checkout code
       uses: actions/checkout@v3
       with:
         fetch-depth: 0
-    
+
     - name: Run TruffleHog
       uses: trufflesecurity/trufflehog@main
       with:
@@ -22,15 +23,15 @@ jobs:
         base: ${{ github.event.before }}
         head: ${{ github.event.after }}
         extra_args: --only-verified
-    
+
     - name: Set up Node.js
       uses: actions/setup-node@v2
       with:
         node-version: '18'
-    
+
     - name: Install dependencies
       run: npm install
-    
+
     - name: Run Snyk
       env:
         SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
@@ -38,20 +39,20 @@ jobs:
         npm install -g snyk
         snyk test --json > snyk-results.json || true
       continue-on-error: true
-    
+
     - name: Run Semgrep
       uses: returntocorp/semgrep-action@v1
       with:
         config: auto
-    
+
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v2
-    
+
     - name: Build Docker image
       run: |
         docker buildx create --use
         docker buildx build --file Dockerfile --tag my-node-app:${{ github.sha }} --load .
-    
+
     - name: Run Trivy vulnerability scanner
       uses: aquasecurity/trivy-action@master
       with:
@@ -61,7 +62,7 @@ jobs:
         ignore-unfixed: true
         vuln-type: 'os,library'
         severity: 'CRITICAL,HIGH'
-    
+
     - name: Upload scan results
       uses: actions/upload-artifact@v2
       with:
@@ -69,22 +70,22 @@ jobs:
         path: |
           snyk-results.json
           semgrep-results.sarif
-    
+
     - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v1
       with:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ secrets.AWS_REGION }}
-    
+
     - name: Log in to Amazon ECR
       id: login-ecr
       uses: aws-actions/amazon-ecr-login@v1
-    
+
     - name: Create ECR repository if it doesn't exist
       run: |
         aws ecr describe-repositories --repository-names ${{ secrets.AWS_ECR_REPOSITORY_NAME }} || aws ecr create-repository --repository-name ${{ secrets.AWS_ECR_REPOSITORY_NAME }}
-    
+
     - name: Push Docker image to Amazon ECR
       env:
         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
@@ -97,3 +98,18 @@ jobs:
         fi
         docker tag my-node-app:${{ github.sha }} $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
         docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+    - name: Start Minikube
+      run: minikube start
+      env:
+        KUBECONFIG: ${{ secrets.KUBECONFIG }}
+
+    - name: Configure Docker to use Minikube
+      run: eval $(minikube docker-env)
+
+    - name: Deploy to Minikube
+      run: |
+        kubectl apply -f deployment.yaml
+        kubectl apply -f service.yaml
+      env:
+        KUBECONFIG: ${{ secrets.KUBECONFIG }}
