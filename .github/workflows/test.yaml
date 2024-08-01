@@ -17,6 +17,9 @@ jobs:
       with:
         fetch-depth: 0
 
+    - name: Decode and set kubeconfig
+      run: echo $KUBECONFIG | base64 --decode > ~/.kube/config
+
     - name: Run TruffleHog
       uses: trufflesecurity/trufflehog@main
       with:
