@@ -7,12 +7,163 @@ on:
   workflow_dispatch:
 
 jobs:
-  security_scan:
+  trufflehog:
     runs-on: self-hosted
-    strategy:
-      matrix:
-        job: [trufflehog, snyk, semgrep, docker_build, trivy, deploy]
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
 
+    - name: Run TruffleHog
+      uses: trufflesecurity/trufflehog@main
+      with:
+        path: .
+        base: ${{ github.event.before }}
+        head: ${{ github.event.after }}
+        extra_args: --only-verified
+
+  snyk:
+    runs-on: self-hosted
+    needs: trufflehog
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v2
+      with:
+        node-version: '18'
+
+    - name: Install dependencies
+      run: npm install
+
+    - name: Run Snyk
+      env:
+        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      run: |
+        npm install -g snyk
+        snyk test --json > snyk-results.json || true
+      continue-on-error: true
+
+  semgrep:
+    runs-on: self-hosted
+    needs: snyk
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+
+    - name: Run Semgrep
+      uses: returntocorp/semgrep-action@v1
+      with:
+        config: auto
+
+  docker_build:
+    runs-on: self-hosted
+    needs: semgrep
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v2
+      with:
+        node-version: '18'
+
+    - name: Install dependencies
+      run: npm install
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+
+    - name: Configure Docker to use Minikube
+      run: eval $(minikube docker-env)
+
+    - name: Build Docker image
+      run: |
+        docker buildx create --use
+        docker buildx build --file Dockerfile --tag my-node-app:latest --load .
+
+  trivy:
+    runs-on: self-hosted
+    needs: docker_build
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+
+    - name: Configure Docker to use Minikube
+      run: eval $(minikube docker-env)
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'my-node-app:latest'
+        format: 'table'
+        exit-code: '1'
+        ignore-unfixed: true
+        vuln-type: 'os,library'
+        severity: 'CRITICAL,HIGH'
+
+    - name: Upload scan results
+      uses: actions/upload-artifact@v2
+      with:
+        name: scan-results
+        path: trivy-results.json
+
+  ecr_push:
+    runs-on: self-hosted
+    needs: trivy
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+
+    - name: Configure Docker to use Minikube
+      run: eval $(minikube docker-env)
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Log in to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Create ECR repository if it doesn't exist
+      run: |
+        aws ecr describe-repositories --repository-names ${{ secrets.AWS_ECR_REPOSITORY_NAME }} || aws ecr create-repository --repository-name ${{ secrets.AWS_ECR_REPOSITORY_NAME }}
+
+    - name: Push Docker image to Amazon ECR
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REPOSITORY: ${{ secrets.AWS_ECR_REPOSITORY_NAME }}
+        IMAGE_TAG: latest
+      run: |
+        if [ -z "$ECR_REPOSITORY" ]; then
+          echo "Error: ECR_REPOSITORY is not set. Please make sure AWS_ECR_REPOSITORY_NAME secret is configured."
+          exit 1
+        fi
+        docker tag my-node-app:latest $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+  deploy:
+    runs-on: self-hosted
+    needs: ecr_push
     steps:
     - name: Checkout code
       uses: actions/checkout@v3
@@ -26,106 +177,5 @@ jobs:
         echo "$KUBECONFIG_BASE64" | base64 --decode > ~/.kube/kubeconfig
         export KUBECONFIG=~/.kube/kubeconfig
 
-    - name: Run TruffleHog
-      if: matrix.job == 'trufflehog'
-      uses: trufflesecurity/trufflehog@main
-      with:
-        path: .
-        base: ${{ github.event.before }}
-        head: ${{ github.event.after }}
-        extra_args: --only-verified
-
-    - name: Set up Node.js
-      if: matrix.job == 'snyk' || matrix.job == 'docker_build' || matrix.job == 'trivy'
-      uses: actions/setup-node@v2
-      with:
-        node-version: '18'
-
-    - name: Install dependencies
-      if: matrix.job == 'snyk' || matrix.job == 'docker_build' || matrix.job == 'trivy'
-      run: npm install
-
-    - name: Run Snyk
-      if: matrix.job == 'snyk'
-      env:
-        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-      run: |
-        npm install -g snyk
-        snyk test --json > snyk-results.json || true
-      continue-on-error: true
-
-    - name: Run Semgrep
-      if: matrix.job == 'semgrep'
-      uses: returntocorp/semgrep-action@v1
-      with:
-        config: auto
-
-    - name: Set up Docker Buildx
-      if: matrix.job == 'docker_build' || matrix.job == 'trivy' || matrix.job == 'deploy'
-      uses: docker/setup-buildx-action@v2
-
-    - name: Configure Docker to use Minikube
-      if: matrix.job == 'docker_build' || matrix.job == 'trivy' || matrix.job == 'deploy'
-      run: eval $(minikube docker-env)
-
-    - name: Build Docker image
-      if: matrix.job == 'docker_build'
-      run: |
-        docker buildx create --use
-        docker buildx build --file Dockerfile --tag my-node-app:latest --load .
-
-    - name: Run Trivy vulnerability scanner
-      if: matrix.job == 'trivy'
-      uses: aquasecurity/trivy-action@master
-      with:
-        image-ref: 'my-node-app:latest'
-        format: 'table'
-        exit-code: '1'
-        ignore-unfixed: true
-        vuln-type: 'os,library'
-        severity: 'CRITICAL,HIGH'
-
-    - name: Upload scan results
-      if: matrix.job == 'snyk' || matrix.job == 'semgrep' || matrix.job == 'trivy'
-      uses: actions/upload-artifact@v2
-      with:
-        name: scan-results
-        path: |
-          snyk-results.json
-          semgrep-results.sarif
-
-    - name: Configure AWS credentials
-      if: matrix.job == 'docker_build' || matrix.job == 'trivy' || matrix.job == 'deploy'
-      uses: aws-actions/configure-aws-credentials@v1
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ secrets.AWS_REGION }}
-
-    - name: Log in to Amazon ECR
-      if: matrix.job == 'docker_build' || matrix.job == 'trivy' || matrix.job == 'deploy'
-      id: login-ecr
-      uses: aws-actions/amazon-ecr-login@v1
-
-    - name: Create ECR repository if it doesn't exist
-      if: matrix.job == 'docker_build' || matrix.job == 'trivy' || matrix.job == 'deploy'
-      run: |
-        aws ecr describe-repositories --repository-names ${{ secrets.AWS_ECR_REPOSITORY_NAME }} || aws ecr create-repository --repository-name ${{ secrets.AWS_ECR_REPOSITORY_NAME }}
-
-    - name: Push Docker image to Amazon ECR
-      if: matrix.job == 'docker_build'
-      env:
-        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        ECR_REPOSITORY: ${{ secrets.AWS_ECR_REPOSITORY_NAME }}
-        IMAGE_TAG: latest
-      run: |
-        if [ -z "$ECR_REPOSITORY" ]; then
-          echo "Error: ECR_REPOSITORY is not set. Please make sure AWS_ECR_REPOSITORY_NAME secret is configured."
-          exit 1
-        fi
-        docker tag my-node-app:latest $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-
     - name: Deploy to Minikube
-      if: matrix.job == 'deploy'
       run: kubectl apply -f deployment.yaml
