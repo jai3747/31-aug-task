@@ -7,11 +7,12 @@ on:
   workflow_dispatch:
 
 jobs:
-  security_scans_and_deploy:
+  security_scan:
     runs-on: self-hosted
     strategy:
       matrix:
-        job: [trufflehog, snyk, semgrep, docker_build, trivy]
+        job: [trufflehog, snyk, semgrep, docker_build, trivy, deploy]
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v3
@@ -60,11 +61,11 @@ jobs:
         config: auto
 
     - name: Set up Docker Buildx
-      if: matrix.job == 'docker_build' || matrix.job == 'trivy'
+      if: matrix.job == 'docker_build' || matrix.job == 'trivy' || matrix.job == 'deploy'
       uses: docker/setup-buildx-action@v2
 
     - name: Configure Docker to use Minikube
-      if: matrix.job == 'docker_build' || matrix.job == 'trivy'
+      if: matrix.job == 'docker_build' || matrix.job == 'trivy' || matrix.job == 'deploy'
       run: eval $(minikube docker-env)
 
     - name: Build Docker image
@@ -94,7 +95,7 @@ jobs:
           semgrep-results.sarif
 
     - name: Configure AWS credentials
-      if: matrix.job == 'docker_build' || matrix.job == 'trivy'
+      if: matrix.job == 'docker_build' || matrix.job == 'trivy' || matrix.job == 'deploy'
       uses: aws-actions/configure-aws-credentials@v1
       with:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -102,12 +103,12 @@ jobs:
         aws-region: ${{ secrets.AWS_REGION }}
 
     - name: Log in to Amazon ECR
-      if: matrix.job == 'docker_build' || matrix.job == 'trivy'
+      if: matrix.job == 'docker_build' || matrix.job == 'trivy' || matrix.job == 'deploy'
       id: login-ecr
       uses: aws-actions/amazon-ecr-login@v1
 
     - name: Create ECR repository if it doesn't exist
-      if: matrix.job == 'docker_build' || matrix.job == 'trivy'
+      if: matrix.job == 'docker_build' || matrix.job == 'trivy' || matrix.job == 'deploy'
       run: |
         aws ecr describe-repositories --repository-names ${{ secrets.AWS_ECR_REPOSITORY_NAME }} || aws ecr create-repository --repository-name ${{ secrets.AWS_ECR_REPOSITORY_NAME }}
 
@@ -126,6 +127,5 @@ jobs:
         docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
 
     - name: Deploy to Minikube
-      if: matrix.job == 'docker_build'
+      if: matrix.job == 'deploy'
       run: kubectl apply -f deployment.yaml
-      
