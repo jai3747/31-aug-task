@@ -7,8 +7,25 @@ on:
   workflow_dispatch:
 
 jobs:
+  trufflehog:
+    runs-on: self-hosted
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+
+    - name: Run TruffleHog
+      uses: trufflesecurity/trufflehog@main
+      with:
+        path: .
+        base: ${{ github.event.before }}
+        head: ${{ github.event.after }}
+        extra_args: --only-verified
+
   snyk:
     runs-on: self-hosted
+    needs: trufflehog
     steps:
     - name: Checkout code
       uses: actions/checkout@v3
@@ -28,12 +45,6 @@ jobs:
           npm install
         fi
 
-    - name: Save dependencies as artifact
-      uses: actions/upload-artifact@v2
-      with:
-        name: node-modules
-        path: node_modules
-
     - name: Run Snyk
       env:
         SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
@@ -42,7 +53,13 @@ jobs:
         snyk test --json > snyk-results.json || true
       continue-on-error: true
 
-  docker_build:
+    - name: Upload node_modules as artifact
+      uses: actions/upload-artifact@v2
+      with:
+        name: node-modules
+        path: node_modules/
+
+  semgrep:
     runs-on: self-hosted
     needs: snyk
     steps:
@@ -51,10 +68,25 @@ jobs:
       with:
         fetch-depth: 0
 
-    - name: Download dependencies artifact
+    - name: Run Semgrep
+      uses: returntocorp/semgrep-action@v1
+      with:
+        config: auto
+
+  docker_build:
+    runs-on: self-hosted
+    needs: semgrep
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+
+    - name: Download node_modules artifact
       uses: actions/download-artifact@v2
       with:
         name: node-modules
+        path: ./node_modules/
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v2
@@ -62,12 +94,6 @@ jobs:
     - name: Build Docker image
       run: |
         docker build --file Dockerfile --tag my-node-app:${{ github.sha }} .
-
-    - name: Save Docker image as an artifact
-      uses: actions/upload-artifact@v2
-      with:
-        name: docker-image
-        path: my-node-app:${{ github.sha }}
 
   trivy:
     runs-on: self-hosted
@@ -77,11 +103,6 @@ jobs:
       uses: actions/checkout@v3
       with:
         fetch-depth: 0
-
-    - name: Download Docker image artifact
-      uses: actions/download-artifact@v2
-      with:
-        name: docker-image
 
     - name: Run Trivy vulnerability scanner
       uses: aquasecurity/trivy-action@master
@@ -128,9 +149,5 @@ jobs:
         docker tag my-node-app:${{ github.sha }} $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
         docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
 
-  
-
     - name: Deploy to Kubernetes
-      run: |
-        kubectl apply -f deployment.yaml
-
+      run: kubectl apply -f deployment.yaml
